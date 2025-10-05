@@ -1,0 +1,52 @@
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: ./apps/orchestrator/Dockerfile
+    environment:
+      # Z.AI GLM configuration (as per https://docs.z.ai/scenario-example/develop-tools/claude)
+      - CLAUDE_CODE_AUTO_APPROVE=1
+      - ZAI_API_KEY=${ZAI_API_KEY}
+      - ANTHROPIC_AUTH_TOKEN=${ZAI_API_KEY}
+      - ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=glm-4.6
+      - ANTHROPIC_DEFAULT_OPUS_MODEL=glm-4.6
+      - CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000
+      - MAX_THINKING_TOKENS=32000
+      - API_TIMEOUT_MS=3000000
+      # Concurrency limits
+      - CLAUDE_CODE_MAX_PARALLEL_TOOL_CALLS=2
+      - ANTHROPIC_MAX_PARALLEL_TOOL_CALLS=2
+      # MCP integrations
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - PG_URL=${PG_URL}
+      # Orchestrator configuration
+      - NODE_ENV=production
+      - MODEL=${MODEL:-claude-sonnet-4-5-20250929}
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+      - MAX_ITERATIONS=${MAX_ITERATIONS:-12}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - DEFAULT_TIMEOUT=${DEFAULT_TIMEOUT:-600000}
+      - MAX_CONCURRENT_OPS=${MAX_CONCURRENT_OPS:-5}
+      - API_TIMEOUT_MS=3000000
+    volumes:
+      - ./project:/project
+      - claude_home:/home/claude/.claude  # persists login, checkpoints, transcripts (for non-root user)
+    working_dir: /app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "test", "-f", "/project/.claude/session.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # (Optional) Remote MCP servers you host; many official ones are SaaS (HTTP/SSE)
+  # browser:
+  #   image: ghcr.io/yourorg/puppeteer-mcp:latest
+  #   environment: [ "AUTH_TOKEN=${BROWSER_MCP_TOKEN}" ]
+  #   ports: ["8090:8090"]
+
+volumes:
+  claude_home:

@@ -56,8 +56,11 @@ autonomous-claude/
 ├── apps/
 │   └── orchestrator/           # Node.js orchestrator service
 │       ├── src/index.ts       # Main orchestrator logic
-│       ├── package.json
-│       └── Dockerfile
+│       ├── .eslintrc.json     # ESLint configuration
+│       ├── .prettierrc.json   # Prettier configuration
+│       ├── .prettierignore    # Prettier ignore patterns
+│       ├── package.json       # Dependencies and scripts
+│       └── Dockerfile         # Container with quality checks
 ├── project/                   # Your working project
 │   ├── .claude/
 │   │   ├── agents/           # Sub-agent configurations
@@ -66,6 +69,9 @@ autonomous-claude/
 │   │   └── .mcp.json        # MCP tool integrations
 │   ├── GOAL.md              # 📝 Your detailed goal (large prompts here!)
 │   └── CLAUDE.md            # System context and guidelines
+├── scripts/
+│   ├── pre-commit-hook.sh    # Git pre-commit quality checks
+│   └── setup-git-hooks.sh    # Git hooks installation script
 ├── docker-compose.yml
 ├── .env.example
 └── README.md
@@ -97,8 +103,9 @@ autonomous-claude/
 
 ### Post-Tool Use Hook
 - Runs automated tests (Node.js, Python, Rust, Go)
-- Executes linting and security scans
-- Validates code quality
+- Executes ESLint and Prettier checks
+- Validates code quality and formatting
+- Performs security scans
 
 ### Session Summary Hook
 - Generates comprehensive session reports
@@ -131,6 +138,40 @@ Each phase includes automatic checkpoints for safe recovery.
 - **Checkpoints**: Safe rollback capabilities
 - **Timeouts**: Prevent infinite loops
 - **Resource limits**: Controlled resource usage
+
+## 🛠️ Code Quality & Development
+
+### Automated Code Quality
+The system includes comprehensive code quality tools that run automatically:
+
+- **ESLint**: TypeScript/JavaScript linting with strict rules
+- **Prettier**: Consistent code formatting
+- **Pre-commit hooks**: Quality checks before every commit
+- **Docker integration**: Quality checks run during container builds
+
+### Development Scripts
+```bash
+# In apps/orchestrator directory:
+npm run lint          # Run ESLint
+npm run lint:fix      # Auto-fix ESLint issues
+npm run format        # Format code with Prettier
+npm run format:check  # Check formatting without changes
+npm run quality       # Run all quality checks
+npm run quality:fix   # Fix all auto-fixable issues
+```
+
+### Setting Up Git Hooks
+```bash
+# Install pre-commit hooks for local development
+./scripts/setup-git-hooks.sh
+```
+
+### Docker Quality Checks
+Quality checks run automatically during Docker builds:
+1. ESLint validates code quality
+2. Prettier checks formatting
+3. TypeScript compilation verifies types
+4. Build fails if any checks fail
 
 ## 🔧 Configuration
 

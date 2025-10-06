@@ -91,7 +91,7 @@ The orchestrator runs through these phases automatically:
 - Resume from where it left off
 
 ### Rate Limit Handling
-- Detects Z.AI rate limits (120 messages per 5 hours)
+- Detects Z.AI rate limits (600 messages per 5 hours)
 - Automatically waits and retries
 - No manual intervention needed
 
@@ -103,6 +103,26 @@ The orchestrator runs through these phases automatically:
 ### Concurrency Control
 - Limits parallel tool calls to prevent API errors
 - Configurable via `CLAUDE_CODE_MAX_PARALLEL_TOOL_CALLS`
+
+### Code Quality Enforcement
+- ESLint and Prettier run automatically during Docker builds
+- Build fails if code quality checks fail
+- Pre-commit hooks available for local development
+- Consistent code formatting and linting rules
+
+## Development Setup (Optional)
+
+If you plan to modify the orchestrator code:
+
+```bash
+# Install git hooks for code quality
+./scripts/setup-git-hooks.sh
+
+# Run quality checks manually
+cd apps/orchestrator
+npm run quality        # Check linting and formatting
+npm run quality:fix    # Auto-fix issues
+```
 
 ## Configuration
 
@@ -247,11 +267,17 @@ my-new-project/
 ├── SESSION_PERSISTENCE.md   # Session management docs
 ├── apps/
 │   └── orchestrator/        # Orchestrator service
-│       ├── Dockerfile
-│       ├── package.json
+│       ├── .eslintrc.json   # ESLint configuration
+│       ├── .prettierrc.json # Prettier configuration
+│       ├── .prettierignore  # Prettier ignore patterns
+│       ├── Dockerfile       # Container with quality checks
+│       ├── package.json     # Dependencies and scripts
 │       ├── src/
 │       │   └── index.ts     # Main orchestrator logic
 │       └── tsconfig.json
+├── scripts/
+│   ├── pre-commit-hook.sh   # Git pre-commit quality checks
+│   └── setup-git-hooks.sh   # Git hooks installation
 └── project/                 # Your workspace
     ├── .claude/             # Session data (auto-generated)
     ├── .mcp.json           # MCP server configuration

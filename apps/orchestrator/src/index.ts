@@ -1,8 +1,15 @@
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { createWriteStream } from "node:fs";
+import { spawn } from 'node:child_process';
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  unlinkSync,
+  readdirSync,
+  statSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import { createWriteStream, WriteStream } from 'node:fs';
 
 interface SessionState {
   sessionId?: string;
@@ -11,7 +18,7 @@ interface SessionState {
   iteration: number;
   maxIterations: number;
   lastCheckpoint?: string;
-  agentContext?: any;
+  agentContext?: unknown;
   startTime: string;
   errors: Array<{
     timestamp: string;
@@ -34,11 +41,11 @@ interface LogEntry {
   phase: string;
   iteration: number;
   message: string;
-  metadata?: any;
+  metadata?: unknown;
 }
 
 class Logger {
-  private logFile: NodeJS.WritableStream;
+  private logFile: WriteStream;
   private logLevel: string = process.env.LOG_LEVEL || 'info';
 
   constructor(projectDir: string) {
@@ -101,7 +108,10 @@ class ResourceManager {
 
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`Operation ${operationId} timed out after ${timeoutMs}ms`)), timeoutMs);
+        setTimeout(
+          () => reject(new Error(`Operation ${operationId} timed out after ${timeoutMs}ms`)),
+          timeoutMs
+        );
       });
 
       return await Promise.race([operation(), timeoutPromise]);
@@ -134,11 +144,11 @@ interface ClaudeTurn {
   result?: string;
   session_id?: string;
   is_error?: boolean;
-  content?: any;
+  content?: unknown;
 }
 
 class Orchestrator {
-  private projectDir = "/project";
+  private projectDir = '/project';
   private maxRetries = parseInt(process.env.MAX_RETRIES || '3');
   private timeoutMs = parseInt(process.env.DEFAULT_TIMEOUT || '300000'); // 5 minutes
   private sessionState: SessionState;
@@ -161,12 +171,12 @@ class Orchestrator {
       metrics: {
         totalOperations: 0,
         successfulOperations: 0,
-        failedOperations: 0
-      }
+        failedOperations: 0,
+      },
     };
 
     // Load goal from file or use fallback
-    this.goal = this.loadGoal() || goalFallback || "Build a complete MVP application";
+    this.goal = this.loadGoal() || goalFallback || 'Build a complete MVP application';
 
     // Validate environment
     this.validateEnvironment();
@@ -187,13 +197,17 @@ class Orchestrator {
     }
 
     if (!this.goal || this.goal.trim().length === 0) {
-      throw new Error('Goal cannot be empty. Please create a GOAL.md file in the project directory or set GOAL environment variable.');
+      throw new Error(
+        'Goal cannot be empty. Please create a GOAL.md file in the project directory or set GOAL environment variable.'
+      );
     }
   }
 
   private setupGracefulShutdown() {
     const shutdown = async (signal: string) => {
-      if (this.isShuttingDown) return;
+      if (this.isShuttingDown) {
+        return;
+      }
       this.isShuttingDown = true;
 
       this.logger.log({
@@ -202,12 +216,12 @@ class Orchestrator {
         phase: this.sessionState.phase,
         iteration: this.sessionState.iteration,
         message: `Received ${signal}, initiating graceful shutdown`,
-        metadata: { activeOperations: this.resourceManager.getActiveOperations() }
+        metadata: { activeOperations: this.resourceManager.getActiveOperations() },
       });
 
       await this.resourceManager.cleanup();
       this.saveSessionState();
-      this.createCheckpoint("shutdown");
+      this.createCheckpoint('shutdown');
       this.logger.close();
 
       console.log(`\n✅ Graceful shutdown completed`);
@@ -223,39 +237,39 @@ class Orchestrator {
         phase: this.sessionState.phase,
         iteration: this.sessionState.iteration,
         message: `Unhandled rejection at ${promise}`,
-        metadata: { reason }
+        metadata: { reason },
       });
     });
-    process.on('uncaughtException', (error) => {
+    process.on('uncaughtException', error => {
       this.logger.log({
         timestamp: new Date().toISOString(),
         level: 'error',
         phase: this.sessionState.phase,
         iteration: this.sessionState.iteration,
         message: `Uncaught exception: ${error.message}`,
-        metadata: { stack: error.stack }
+        metadata: { stack: error.stack },
       });
       shutdown('uncaughtException');
     });
   }
 
-  private log(level: 'info' | 'warn' | 'error' | 'debug', message: string, metadata?: any) {
+  private log(level: 'info' | 'warn' | 'error' | 'debug', message: string, metadata?: unknown) {
     this.logger.log({
       timestamp: new Date().toISOString(),
       level,
       phase: this.sessionState.phase,
       iteration: this.sessionState.iteration,
       message,
-      metadata
+      metadata,
     });
   }
 
   private loadGoal(): string {
-    const goalFile = join(this.projectDir, "GOAL.md");
+    const goalFile = join(this.projectDir, 'GOAL.md');
 
     if (existsSync(goalFile)) {
       try {
-        const goalContent = readFileSync(goalFile, "utf-8");
+        const goalContent = readFileSync(goalFile, 'utf-8');
         this.log('info', 'Loaded goal from GOAL.md');
         return goalContent.trim();
       } catch (error) {
@@ -264,23 +278,26 @@ class Orchestrator {
     }
 
     // Fallback to environment variable or default
-    const fallbackGoal = process.env.GOAL || "Build a complete MVP application";
+    const fallbackGoal = process.env.GOAL || 'Build a complete MVP application';
     this.log('warn', 'Using fallback goal from environment variable');
     return fallbackGoal;
   }
 
   private loadSessionState(): SessionState {
-    const claudeDir = join(this.projectDir, ".claude");
+    const claudeDir = join(this.projectDir, '.claude');
     if (!existsSync(claudeDir)) {
       mkdirSync(claudeDir, { recursive: true });
     }
 
-    const stateFile = join(claudeDir, "session.json");
+    const stateFile = join(claudeDir, 'session.json');
 
     if (existsSync(stateFile)) {
       try {
-        const state = JSON.parse(readFileSync(stateFile, "utf-8"));
-        this.log('info', `Resuming session ${state.sessionId}, phase: ${state.phase}, iteration: ${state.iteration}`);
+        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        this.log(
+          'info',
+          `Resuming session ${state.sessionId}, phase: ${state.phase}, iteration: ${state.iteration}`
+        );
         return {
           ...state,
           goal: this.goal,
@@ -288,8 +305,8 @@ class Orchestrator {
           metrics: state.metrics || {
             totalOperations: 0,
             successfulOperations: 0,
-            failedOperations: 0
-          }
+            failedOperations: 0,
+          },
         };
       } catch (error) {
         this.log('warn', `Could not load session state: ${error}`);
@@ -306,8 +323,8 @@ class Orchestrator {
       metrics: {
         totalOperations: 0,
         successfulOperations: 0,
-        failedOperations: 0
-      }
+        failedOperations: 0,
+      },
     };
 
     this.log('info', 'Starting fresh session');
@@ -316,7 +333,7 @@ class Orchestrator {
 
   private saveSessionState() {
     try {
-      const stateFile = join(this.projectDir, ".claude", "session.json");
+      const stateFile = join(this.projectDir, '.claude', 'session.json');
       writeFileSync(stateFile, JSON.stringify(this.sessionState, null, 2));
     } catch (error) {
       this.log('error', `Failed to save session state: ${error}`);
@@ -325,19 +342,19 @@ class Orchestrator {
 
   private cleanupOldCheckpoints() {
     try {
-      const claudeDir = join(this.projectDir, ".claude");
+      const claudeDir = join(this.projectDir, '.claude');
       const files = readdirSync(claudeDir)
         .filter((file: string) => file.startsWith('checkpoint_'))
         .map((file: string) => ({
           name: file,
           path: join(claudeDir, file),
-          time: statSync(join(claudeDir, file)).mtime
+          time: statSync(join(claudeDir, file)).mtime,
         }))
-        .sort((a: any, b: any) => b.time.getTime() - a.time.getTime());
+        .sort((a, b) => b.time.getTime() - a.time.getTime());
 
       // Keep only the latest 10 checkpoints
       if (files.length > 10) {
-        files.slice(10).forEach((file: any) => {
+        files.slice(10).forEach(file => {
           try {
             unlinkSync(file.path);
             this.log('debug', `Deleted old checkpoint: ${file.name}`);
@@ -353,12 +370,16 @@ class Orchestrator {
 
   private createCheckpoint(status: string) {
     try {
-      const checkpointFile = join(this.projectDir, ".claude", `checkpoint_${Date.now()}_${status}.json`);
+      const checkpointFile = join(
+        this.projectDir,
+        '.claude',
+        `checkpoint_${Date.now()}_${status}.json`
+      );
       const checkpoint = {
         ...this.sessionState,
         timestamp: new Date().toISOString(),
         status,
-        uptime: Date.now() - new Date(this.sessionState.startTime).getTime()
+        uptime: Date.now() - new Date(this.sessionState.startTime).getTime(),
       };
 
       writeFileSync(checkpointFile, JSON.stringify(checkpoint, null, 2));
@@ -374,29 +395,31 @@ class Orchestrator {
       // Set environment variables for Z.AI GLM (as per Z.AI script)
       const env = {
         ...process.env,
-        ANTHROPIC_AUTH_TOKEN: process.env.ZAI_API_KEY!,
-        ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic",
-        API_TIMEOUT_MS: process.env.API_TIMEOUT_MS || "3000000",
-        HOME: process.env.HOME || "/home/claude",
-        CLAUDE_PROJECT_DIR: this.projectDir
+        ANTHROPIC_AUTH_TOKEN: process.env.ZAI_API_KEY || '',
+        ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
+        API_TIMEOUT_MS: process.env.API_TIMEOUT_MS || '3000000',
+        HOME: process.env.HOME || '/home/claude',
+        CLAUDE_PROJECT_DIR: this.projectDir,
       };
 
       const claudeArgs = [
-        "-p",
-        "--verbose",
-        "--dangerously-skip-permissions",  // Skip all permission checks - safe in Docker
-        "--output-format", "stream-json",
-        "--mcp-config", join(this.projectDir, ".mcp.json"),
-        ...args
+        '-p',
+        '--verbose',
+        '--dangerously-skip-permissions', // Skip all permission checks - safe in Docker
+        '--output-format',
+        'stream-json',
+        '--mcp-config',
+        join(this.projectDir, '.mcp.json'),
+        ...args,
       ];
 
-      this.log('info', `Running Claude with args: ${claudeArgs.join(" ")}`);
+      this.log('info', `Running Claude with args: ${claudeArgs.join(' ')}`);
       this.log('info', `Sending prompt to Claude: ${input?.substring(0, 200)}...`);
 
-      const p = spawn("claude", claudeArgs, {
-        stdio: ["pipe", "pipe", "pipe"],
+      const p = spawn('claude', claudeArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
         cwd: this.projectDir,
-        env
+        env,
       });
 
       if (input) {
@@ -404,26 +427,29 @@ class Orchestrator {
         p.stdin.end();
       }
 
-      let stdout = "";
-      let stderr = "";
+      let stdout = '';
+      let stderr = '';
       let lastLogTime = Date.now();
 
-      p.stdout.on("data", (data) => {
+      p.stdout.on('data', data => {
         const chunk = data.toString();
         stdout += chunk;
-        
+
         // Log streaming output with activity details
         const now = Date.now();
         if (now - lastLogTime > 2000 || chunk.length > 500) {
           this.log('info', `Claude streaming response (${stdout.length} bytes received)...`);
           // Try to parse and log recent JSON lines
-          const lines = stdout.trim().split("\n");
+          const lines = stdout.trim().split('\n');
           if (lines.length > 0) {
             const lastLine = lines[lines.length - 1];
             try {
               const parsed = JSON.parse(lastLine);
               if (parsed.type === 'assistant' || parsed.type === 'tool_use') {
-                this.log('info', `Claude activity: ${parsed.type} - ${JSON.stringify(parsed).substring(0, 300)}`);
+                this.log(
+                  'info',
+                  `Claude activity: ${parsed.type} - ${JSON.stringify(parsed).substring(0, 300)}`
+                );
               }
             } catch (e) {
               // Not valid JSON yet, continue
@@ -433,64 +459,86 @@ class Orchestrator {
         }
       });
 
-      p.stderr.on("data", (data) => {
+      p.stderr.on('data', data => {
         const chunk = data.toString();
         stderr += chunk;
         this.log('warn', `Claude stderr: ${chunk.substring(0, 500)}`);
       });
 
       const timeout = setTimeout(() => {
-        p.kill("SIGKILL");
+        p.kill('SIGKILL');
         reject(new Error(`Claude process timed out after ${this.timeoutMs}ms`));
       }, this.timeoutMs);
 
-      p.on("close", (code) => {
+      p.on('close', code => {
         clearTimeout(timeout);
 
-        this.log('info', `Claude process exited with code ${code}, received ${stdout.length} bytes`);
+        this.log(
+          'info',
+          `Claude process exited with code ${code}, received ${stdout.length} bytes`
+        );
 
         if (code !== 0) {
-          const errorMsg = stderr || stdout || "No error output available";
+          const errorMsg = stderr || stdout || 'No error output available';
           this.log('error', `Claude error output: ${errorMsg.substring(0, 1000)}`);
-          
-          // Check for rate limit error (120 messages per 5 hours)
-          if (errorMsg.includes('rate limit') || errorMsg.includes('Rate limit') || errorMsg.includes('too many requests')) {
-            this.log('warn', 'Rate limit hit (120 messages per 5 hours). Will retry after waiting...');
+
+          // Check for rate limit error (600 messages per 5 hours)
+          if (
+            errorMsg.includes('rate limit') ||
+            errorMsg.includes('Rate limit') ||
+            errorMsg.includes('too many requests')
+          ) {
+            this.log(
+              'warn',
+              'Rate limit hit (600 messages per 5 hours). Will retry after waiting...'
+            );
             reject(new Error(`RATE_LIMIT: ${errorMsg}`));
             return;
           }
-          
+
           reject(new Error(`Claude exited with code ${code}: ${errorMsg}`));
           return;
         }
 
         try {
-          const lines = stdout.trim().split("\n").filter(line => line.trim());
+          const lines = stdout
+            .trim()
+            .split('\n')
+            .filter(line => line.trim());
           if (lines.length === 0) {
-            reject(new Error("Claude produced no output"));
+            reject(new Error('Claude produced no output'));
             return;
           }
-          
+
           const turns = lines.map(line => JSON.parse(line) as ClaudeTurn);
-          
+
           // Log summary of what Claude did
-          const toolUses = turns.filter(t => t.type === 'tool_use' || (t.content && Array.isArray(t.content)));
+          const toolUses = turns.filter(
+            t => t.type === 'tool_use' || (t.content && Array.isArray(t.content))
+          );
           const assistantMessages = turns.filter(t => t.type === 'assistant');
-          
-          this.log('info', `Claude completed: ${turns.length} turns, ${assistantMessages.length} messages, ${toolUses.length} tool uses`);
-          
+
+          this.log(
+            'info',
+            `Claude completed: ${turns.length} turns, ${assistantMessages.length} messages, ${toolUses.length} tool uses`
+          );
+
           // Log assistant messages in detail
-          assistantMessages.forEach((turn: any, idx) => {
+          assistantMessages.forEach((turn, idx) => {
             if (turn.result) {
               this.log('info', `Assistant message ${idx + 1}: ${turn.result.substring(0, 500)}`);
             }
           });
-          
+
           resolve(turns);
         } catch (error) {
           this.log('error', `Failed to parse Claude output: ${error}`);
           this.log('debug', `Raw output sample: ${stdout.substring(0, 1000)}`);
-          reject(new Error(`Failed to parse Claude output: ${error}. Output: ${stdout.substring(0, 500)}`));
+          reject(
+            new Error(
+              `Failed to parse Claude output: ${error}. Output: ${stdout.substring(0, 500)}`
+            )
+          );
         }
       });
     });
@@ -516,18 +564,17 @@ class Orchestrator {
       this.sessionState.metrics.successfulOperations++;
       this.log('info', `Completed ${phaseName} phase successfully`);
       return result;
-
     } catch (error) {
       this.sessionState.metrics.failedOperations++;
       this.sessionState.errors.push({
         timestamp: new Date().toISOString(),
         phase: this.sessionState.phase,
         error: error instanceof Error ? error.message : String(error),
-        recovered: false
+        recovered: false,
       });
 
       this.log('error', `Failed ${phaseName} phase: ${error}`, {
-        error: error instanceof Error ? error.stack : error
+        error: error instanceof Error ? error.stack : error,
       });
       throw error;
     }
@@ -537,32 +584,36 @@ class Orchestrator {
     this.log('info', `Starting autonomous Claude system`, {
       goalLength: this.goal.length,
       maxIterations: this.sessionState.maxIterations,
-      timeoutMs: this.timeoutMs
+      timeoutMs: this.timeoutMs,
     });
 
     try {
       await this.executeAutonomousLoop();
     } catch (error) {
       this.log('error', `Autonomous run failed: ${error}`, {
-        error: error instanceof Error ? error.stack : error
+        error: error instanceof Error ? error.stack : error,
       });
-      this.createCheckpoint("error");
+      this.createCheckpoint('error');
       throw error;
     } finally {
       this.log('info', 'Orchestrator run completed', {
         finalMetrics: this.sessionState.metrics,
         totalErrors: this.sessionState.errors.length,
-        uptime: Date.now() - new Date(this.sessionState.startTime).getTime()
+        uptime: Date.now() - new Date(this.sessionState.startTime).getTime(),
       });
     }
   }
 
   private async executeAutonomousLoop() {
     while (this.sessionState.iteration < this.sessionState.maxIterations && !this.isShuttingDown) {
-      this.log('info', `Starting iteration ${this.sessionState.iteration + 1}/${this.sessionState.maxIterations}`, {
-        phase: this.sessionState.phase,
-        metricsSoFar: this.sessionState.metrics
-      });
+      this.log(
+        'info',
+        `Starting iteration ${this.sessionState.iteration + 1}/${this.sessionState.maxIterations}`,
+        {
+          phase: this.sessionState.phase,
+          metricsSoFar: this.sessionState.metrics,
+        }
+      );
 
       try {
         switch (this.sessionState.phase) {
@@ -570,10 +621,18 @@ class Orchestrator {
             await this.executePhase('planning', () => this.executePlanningPhase());
             break;
           case 'implementation':
-            await this.executePhase('implementation', () => this.executeImplementationPhase(), this.timeoutMs * 2);
+            await this.executePhase(
+              'implementation',
+              () => this.executeImplementationPhase(),
+              this.timeoutMs * 2
+            );
             break;
           case 'testing':
-            await this.executePhase('testing', () => this.executeTestingPhase(), this.timeoutMs * 1.5);
+            await this.executePhase(
+              'testing',
+              () => this.executeTestingPhase(),
+              this.timeoutMs * 1.5
+            );
             break;
           case 'critique':
             await this.executePhase('critique', () => this.executeCritiquePhase());
@@ -583,7 +642,7 @@ class Orchestrator {
             return;
           case 'error':
             this.log('error', 'System in error state, attempting recovery');
-            if (!await this.recoverFromError(new Error('System in error state'))) {
+            if (!(await this.recoverFromError(new Error('System in error state')))) {
               throw new Error('Failed to recover from error state');
             }
             break;
@@ -591,13 +650,12 @@ class Orchestrator {
 
         this.sessionState.iteration++;
         this.saveSessionState();
-        this.createCheckpoint("success");
-
+        this.createCheckpoint('success');
       } catch (error) {
         this.log('error', `Error in ${this.sessionState.phase} phase: ${error}`);
-        this.createCheckpoint("error");
+        this.createCheckpoint('error');
 
-        if (!await this.recoverFromError(error)) {
+        if (!(await this.recoverFromError(error))) {
           this.log('error', 'Recovery failed, aborting run');
           throw error;
         }
@@ -626,9 +684,7 @@ Break down the goal into specific, actionable tasks. Consider:
 Output a structured plan with clear phases and dependencies.
 Use the project-planner agent for this task.`;
 
-    const args = this.sessionState.sessionId
-      ? ["--resume", this.sessionState.sessionId]
-      : [];
+    const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
     const turns = await this.runClaude(args, prompt);
 
@@ -658,11 +714,9 @@ Use appropriate sub-agents and tools. Focus on:
 Work systematically through the planned tasks.
 Use the implementer agent for development tasks and researcher agent for investigating solutions.`;
 
-    const args = this.sessionState.sessionId
-      ? ["--resume", this.sessionState.sessionId]
-      : [];
+    const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
-    const turns = await this.runClaude(args, prompt);
+    await this.runClaude(args, prompt);
 
     this.sessionState.phase = 'testing';
     this.log('info', 'Implementation completed');
@@ -683,15 +737,17 @@ Execute:
 Report any failures with specific details and severity levels.
 Use the qa-tester agent for this comprehensive testing.`;
 
-    const args = this.sessionState.sessionId
-      ? ["--resume", this.sessionState.sessionId]
-      : [];
+    const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
     const turns = await this.runClaude(args, prompt);
 
     // Check if tests failed based on the response
-    const response = turns.map(t => t.result).join(' ').toLowerCase();
-    const hasFailures = response.includes("fail") || response.includes("error") || response.includes("critical");
+    const response = turns
+      .map(t => t.result)
+      .join(' ')
+      .toLowerCase();
+    const hasFailures =
+      response.includes('fail') || response.includes('error') || response.includes('critical');
 
     if (hasFailures) {
       this.log('warn', 'Tests failed, entering critique phase');
@@ -718,11 +774,9 @@ Provide a prioritized list of issues with specific fixes needed.
 Rate each issue by severity (Critical/High/Medium/Low).
 Use the critic agent for this comprehensive review, and the security-auditor for security-specific issues.`;
 
-    const args = this.sessionState.sessionId
-      ? ["--resume", this.sessionState.sessionId]
-      : [];
+    const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
-    const turns = await this.runClaude(args, prompt);
+    await this.runClaude(args, prompt);
 
     this.sessionState.phase = 'implementation';
     this.log('info', 'Critique completed, returning to implementation');
@@ -742,35 +796,43 @@ Complete:
 
 Ensure everything is production-ready and well-documented.`;
 
-    const args = this.sessionState.sessionId
-      ? ["--resume", this.sessionState.sessionId]
-      : [];
+    const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
-    const turns = await this.runClaude(args, prompt);
+    await this.runClaude(args, prompt);
 
     this.log('info', 'Autonomous run completed successfully!');
   }
 
-  private async recoverFromError(error: any): Promise<boolean> {
+  private async recoverFromError(error: unknown): Promise<boolean> {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    
-    // Check if this is a rate limit error (120 messages per 5 hours)
-    if (errorMsg.includes('RATE_LIMIT') || errorMsg.includes('rate limit') || errorMsg.includes('too many requests')) {
-      this.log('warn', '⏳ Rate limit hit (120 messages per 5 hours). Waiting 30 minutes before retrying...');
-      
+
+    // Check if this is a rate limit error (600 messages per 5 hours)
+    if (
+      errorMsg.includes('RATE_LIMIT') ||
+      errorMsg.includes('rate limit') ||
+      errorMsg.includes('too many requests')
+    ) {
+      this.log(
+        'warn',
+        '⏳ Rate limit hit (600 messages per 5 hours). Waiting 30 minutes before retrying...'
+      );
+
       // Wait 30 minutes (rate limit resets after 5 hours, but we'll try sooner)
       const waitMinutes = 30;
       const waitMs = waitMinutes * 60 * 1000;
-      
-      this.log('info', `Sleeping for ${waitMinutes} minutes until ${new Date(Date.now() + waitMs).toISOString()}`);
+
+      this.log(
+        'info',
+        `Sleeping for ${waitMinutes} minutes until ${new Date(Date.now() + waitMs).toISOString()}`
+      );
       await new Promise(resolve => setTimeout(resolve, waitMs));
-      
+
       this.log('info', 'Wait complete, resuming operations...');
       return true; // Return true to indicate we should retry
     }
-    
+
     this.log('info', 'Attempting error recovery', {
-      error: errorMsg
+      error: errorMsg,
     });
 
     let retries = 0;
@@ -787,11 +849,9 @@ Recovery attempt ${retries + 1}/${maxRetries}:
 
 Focus on getting back on track with: ${this.sessionState.goal}`;
 
-        const args = this.sessionState.sessionId
-          ? ["--resume", this.sessionState.sessionId]
-          : [];
+        const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
-        const turns = await this.resourceManager.executeOperation(
+        await this.resourceManager.executeOperation(
           `recovery_${retries}`,
           () => this.runClaude(args, recoveryPrompt),
           this.timeoutMs / 2 // Shorter timeout for recovery
@@ -804,20 +864,20 @@ Focus on getting back on track with: ${this.sessionState.goal}`;
 
         this.log('info', `Error recovery successful on attempt ${retries + 1}`);
         return true;
-
       } catch (recoveryError) {
         retries++;
-        const recoveryErrorMsg = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
-        
+        const recoveryErrorMsg =
+          recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+
         // Check if recovery also hit rate limit
         if (recoveryErrorMsg.includes('RATE_LIMIT') || recoveryErrorMsg.includes('rate limit')) {
           this.log('warn', '⏳ Rate limit hit during recovery. Waiting 30 minutes...');
           await new Promise(resolve => setTimeout(resolve, 30 * 60 * 1000));
           continue; // Don't count this as a retry
         }
-        
+
         this.log('warn', `Recovery attempt ${retries} failed`, {
-          error: recoveryErrorMsg
+          error: recoveryErrorMsg,
         });
 
         if (retries < maxRetries) {
@@ -838,13 +898,13 @@ async function main() {
     const orchestrator = new Orchestrator();
     await orchestrator.run();
   } catch (error) {
-    console.error("💥 Fatal error:", error);
+    console.error('💥 Fatal error:', error);
     process.exit(1);
   }
 }
 
 // Handle top-level errors
 main().catch(error => {
-  console.error("💥 Fatal error in main:", error);
+  console.error('💥 Fatal error in main:', error);
   process.exit(1);
 });

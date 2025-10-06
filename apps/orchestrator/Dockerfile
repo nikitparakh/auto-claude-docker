@@ -17,7 +17,14 @@ RUN curl -L -o claude_code_prod_zai.sh "http://bigmodel-us3-prod-marketplace.cn-
 WORKDIR /app
 COPY apps/orchestrator/package*.json ./
 RUN npm ci
+
+# Copy source code and configuration files
 COPY apps/orchestrator/ ./
+
+# Run code quality checks (linting and formatting)
+RUN npm run quality
+
+# Build the application (includes additional quality checks)
 RUN npm run build
 
 # Create .claude directory for session state and set permissions

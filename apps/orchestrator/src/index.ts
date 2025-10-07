@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   readFileSync,
   writeFileSync,
@@ -7,9 +7,12 @@ import {
   unlinkSync,
   readdirSync,
   statSync,
+  copyFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { createWriteStream, WriteStream } from 'node:fs';
+import { DiscordManager } from './discord.js';
+import { feedbackStore } from './feedback.js';
 
 interface SessionState {
   sessionId?: string;
@@ -147,16 +150,58 @@ interface ClaudeTurn {
   content?: unknown;
 }
 
+function promptWithFeedback(originalPrompt: string): string {
+  const pending = feedbackStore.dequeueAll();
+  if (pending.length === 0) {
+    return originalPrompt;
+  }
+
+  const feedbackBlock = pending
+    .map(
+      f =>
+        `- From ${f.authorTag} at ${f.timestamp}: ${f.content}${
+          f.attachments.length > 0
+            ? `\n  Attachments:\n${f.attachments.map(a => `    - ${a.name}: ${a.url}`).join('\n')}`
+            : ''
+        }`
+    )
+    .join('\n');
+
+  return `${originalPrompt}
+
+Additionally, incorporate the following HIGH-PRIORITY external feedback before proceeding. Treat this feedback as top priority requirements and constraints. If it contradicts previous plans, adapt accordingly:
+${feedbackBlock}`;
+}
+
+function slugifyCategoryName(text: string): string {
+  const base = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-');
+  // Discord category name limit is 100 chars; keep it shorter
+  return base.slice(0, 80) || 'project';
+}
+
 class Orchestrator {
   private projectDir = '/project';
+  private projectName = process.env.CLAUDE_PROJECT_NAME || 'claude-project';
   private maxRetries = parseInt(process.env.MAX_RETRIES || '3');
   private timeoutMs = parseInt(process.env.DEFAULT_TIMEOUT || '300000'); // 5 minutes
   private sessionState: SessionState;
   private logger: Logger;
   private resourceManager: ResourceManager;
   private isShuttingDown = false;
+  private discord?: DiscordManager;
+  private statusChannelId?: string;
+  private feedbackChannelId?: string;
+  private statusInterval?: ReturnType<typeof setInterval>;
+  private shouldInterruptForFeedback = false;
+  private currentClaudeProcess?: ReturnType<typeof spawn>;
 
   constructor(goalFallback?: string) {
+    this.ensureProjectWorkspace();
+
     this.logger = new Logger(this.projectDir);
     this.resourceManager = new ResourceManager();
 
@@ -184,9 +229,115 @@ class Orchestrator {
     // Load or update session state
     this.sessionState = this.loadSessionState();
     this.setupGracefulShutdown();
+
+    // Initialize Discord if configured
+    if (process.env.DISCORD_BOT_TOKEN) {
+      const categoryName = process.env.DISCORD_CATEGORY_NAME || slugifyCategoryName(this.goal);
+      this.discord = new DiscordManager({ categoryName });
+    }
   }
 
   private goal: string;
+
+  private ensureProjectWorkspace() {
+    try {
+      if (!existsSync(this.projectDir)) {
+        mkdirSync(this.projectDir, { recursive: true });
+      }
+
+      this.ensureTemplateFiles();
+
+      const gitDir = join(this.projectDir, '.git');
+      if (!existsSync(gitDir)) {
+        const result = spawnSync('git', ['init'], { cwd: this.projectDir });
+        if (result.status !== 0) {
+          throw new Error(result.stderr?.toString() || 'git init failed');
+        }
+      }
+    } catch (error) {
+      throw new Error(
+        `Failed to prepare project workspace: ${error instanceof Error ? error.message : error}`
+      );
+    }
+  }
+
+  private ensureTemplateFiles() {
+    const templateDir = process.env.CLAUDE_PROJECT_TEMPLATE_DIR || '/app/project-template';
+    if (!existsSync(templateDir)) {
+      return;
+    }
+
+    const templateMcpPath = join(templateDir, '.mcp.json');
+    const templateReadmePath = join(templateDir, 'README.md');
+    const templateGoalPath = join(templateDir, 'GOAL.md');
+    const templateClaudePath = join(templateDir, 'CLAUDE.md');
+
+    // Copy .mcp.json
+    const targetMcpPath = join(this.projectDir, '.mcp.json');
+    if (!existsSync(targetMcpPath)) {
+      if (existsSync(templateMcpPath)) {
+        copyFileSync(templateMcpPath, targetMcpPath);
+      } else {
+        const defaultMcpConfig = {
+          mcpServers: {
+            filesystem: {
+              command: 'npx',
+              args: ['-y', '@modelcontextprotocol/server-filesystem', this.projectDir],
+            },
+            github: {
+              command: 'npx',
+              args: ['-y', '@modelcontextprotocol/server-github'],
+              env: {
+                GITHUB_TOKEN: '${GITHUB_TOKEN}',
+              },
+            },
+            postgres: {
+              command: 'npx',
+              args: ['-y', '@modelcontextprotocol/server-postgres', '--url', '${PG_URL}'],
+            },
+            exa: {
+              type: 'http',
+              url: 'https://mcp.exa.ai/mcp',
+              headers: {},
+            },
+            puppeteer: {
+              command: 'npx',
+              args: ['-y', '@modelcontextprotocol/server-puppeteer'],
+            },
+          },
+        } as const;
+        writeFileSync(targetMcpPath, JSON.stringify(defaultMcpConfig, null, 2));
+      }
+    }
+
+    // Copy README.md
+    const targetReadmePath = join(this.projectDir, 'README.md');
+    if (!existsSync(targetReadmePath)) {
+      if (existsSync(templateReadmePath)) {
+        copyFileSync(templateReadmePath, targetReadmePath);
+      } else {
+        writeFileSync(
+          targetReadmePath,
+          `# ${this.projectName}
+
+This repository was initialized automatically by the Claude orchestrator.
+`
+        );
+      }
+    }
+
+    // Copy GOAL.md
+    const targetGoalPath = join(this.projectDir, 'GOAL.md');
+    if (!existsSync(targetGoalPath) && existsSync(templateGoalPath)) {
+      copyFileSync(templateGoalPath, targetGoalPath);
+    }
+
+    // Copy CLAUDE.md
+    const targetClaudePath = join(this.projectDir, 'CLAUDE.md');
+    if (!existsSync(targetClaudePath) && existsSync(templateClaudePath)) {
+      copyFileSync(templateClaudePath, targetClaudePath);
+    }
+  }
 
   private validateEnvironment() {
     const required = ['ZAI_API_KEY'];
@@ -422,6 +573,9 @@ class Orchestrator {
         env,
       });
 
+      // Track the current process so it can be interrupted for feedback
+      this.currentClaudeProcess = p;
+
       if (input) {
         p.stdin.write(input);
         p.stdin.end();
@@ -472,6 +626,22 @@ class Orchestrator {
 
       p.on('close', code => {
         clearTimeout(timeout);
+        this.currentClaudeProcess = undefined;
+
+        // If interrupted for feedback, immediately restart the same phase with feedback
+        if (this.shouldInterruptForFeedback) {
+          this.shouldInterruptForFeedback = false;
+          this.log(
+            'info',
+            'Process interrupted for feedback - restarting immediately with feedback'
+          );
+
+          // Restart the same operation with feedback included
+          this.runClaude(args, input || '')
+            .then(result => resolve(result))
+            .catch(err => reject(err));
+          return;
+        }
 
         this.log(
           'info',
@@ -588,6 +758,7 @@ class Orchestrator {
     });
 
     try {
+      await this.setupDiscordIfEnabled();
       await this.executeAutonomousLoop();
     } catch (error) {
       this.log('error', `Autonomous run failed: ${error}`, {
@@ -596,12 +767,108 @@ class Orchestrator {
       this.createCheckpoint('error');
       throw error;
     } finally {
+      if (this.statusInterval) {
+        clearInterval(this.statusInterval);
+      }
       this.log('info', 'Orchestrator run completed', {
         finalMetrics: this.sessionState.metrics,
         totalErrors: this.sessionState.errors.length,
         uptime: Date.now() - new Date(this.sessionState.startTime).getTime(),
       });
     }
+  }
+
+  private async setupDiscordIfEnabled() {
+    if (!this.discord) {
+      return;
+    }
+    try {
+      await this.discord.login();
+      const { statusChannel, feedbackChannel } = await this.discord.ensureGuildAndChannels();
+      this.statusChannelId = statusChannel.id;
+      this.feedbackChannelId = feedbackChannel.id;
+
+      // Feedback ingestion
+      this.discord.onFeedbackMessage(
+        async (content, authorTag, attachments) => {
+          feedbackStore.enqueue({ authorTag, content, attachments });
+          this.log('info', 'Received Discord feedback - interrupting current cycle', {
+            authorTag,
+            contentPreview: content.substring(0, 120),
+            attachments: attachments.length,
+          });
+
+          // Send immediate acknowledgment back to feedback channel
+          if (this.feedbackChannelId && this.discord) {
+            const ack = [
+              `✅ **Feedback received from ${authorTag}**`,
+              ``,
+              `📝 **Your message:**`,
+              `> ${content.substring(0, 300)}${content.length > 300 ? '...' : ''}`,
+              attachments.length > 0 ? `📎 **Attachments:** ${attachments.length}` : '',
+              ``,
+              `⚡ **Status:** Interrupting current cycle to process your feedback immediately...`,
+              `⏱️ **Current phase:** ${this.sessionState.phase} (iteration ${this.sessionState.iteration}/${this.sessionState.maxIterations})`,
+            ]
+              .filter(Boolean)
+              .join('\n');
+
+            await this.discord.sendMessage(this.feedbackChannelId, ack).catch(err => {
+              this.log('warn', `Failed to send feedback acknowledgment: ${err}`);
+            });
+          }
+
+          // Interrupt the current Claude process to process feedback immediately
+          this.shouldInterruptForFeedback = true;
+          if (this.currentClaudeProcess) {
+            this.log('info', 'Killing current Claude process to handle feedback immediately');
+            this.currentClaudeProcess.kill('SIGTERM');
+          }
+        },
+        { channelId: this.feedbackChannelId }
+      );
+
+      // Periodic status updates (default every 30 minutes)
+      const minutes = parseInt(process.env.STATUS_UPDATE_INTERVAL_MINUTES || '30');
+      const intervalMs = Math.max(1, minutes) * 60 * 1000;
+      await this.sendStatusUpdate(); // initial message
+      this.statusInterval = setInterval(() => {
+        this.sendStatusUpdate().catch(err => {
+          this.log('warn', `Failed to send status update: ${err}`);
+        });
+      }, intervalMs);
+    } catch (error) {
+      this.log('warn', `Discord setup skipped or failed: ${error}`);
+    }
+  }
+
+  private async sendStatusUpdate() {
+    if (!this.discord || !this.statusChannelId) {
+      return;
+    }
+    try {
+      const summary = this.buildStatusSummary();
+      await this.discord.sendMessage(this.statusChannelId, summary);
+    } catch (e) {
+      this.log('warn', `Error during status update: ${e}`);
+    }
+  }
+
+  private buildStatusSummary(): string {
+    const uptimeMs = Date.now() - new Date(this.sessionState.startTime).getTime();
+    const mins = Math.floor(uptimeMs / 60000);
+    const secs = Math.floor((uptimeMs % 60000) / 1000);
+    const metrics = this.sessionState.metrics;
+    return [
+      `Project: ${this.goal}`,
+      `Phase: ${this.sessionState.phase}`,
+      `Iteration: ${this.sessionState.iteration}/${this.sessionState.maxIterations}`,
+      `Uptime: ${mins}m ${secs}s`,
+      `Ops: total=${metrics.totalOperations}, ok=${metrics.successfulOperations}, fail=${metrics.failedOperations}`,
+      feedbackStore.hasPending() ? `Pending feedback: ${feedbackStore.size()}` : undefined,
+    ]
+      .filter(Boolean)
+      .join('\n');
   }
 
   private async executeAutonomousLoop() {
@@ -686,7 +953,7 @@ Use the project-planner agent for this task.`;
 
     const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
-    const turns = await this.runClaude(args, prompt);
+    const turns = await this.runClaude(args, promptWithFeedback(prompt));
 
     // Extract session ID if present
     const sessionTurn = turns.find(t => t.session_id);
@@ -716,7 +983,7 @@ Use the implementer agent for development tasks and researcher agent for investi
 
     const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
-    await this.runClaude(args, prompt);
+    await this.runClaude(args, promptWithFeedback(prompt));
 
     this.sessionState.phase = 'testing';
     this.log('info', 'Implementation completed');
@@ -739,7 +1006,7 @@ Use the qa-tester agent for this comprehensive testing.`;
 
     const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
-    const turns = await this.runClaude(args, prompt);
+    const turns = await this.runClaude(args, promptWithFeedback(prompt));
 
     // Check if tests failed based on the response
     const response = turns
@@ -776,7 +1043,7 @@ Use the critic agent for this comprehensive review, and the security-auditor for
 
     const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
-    await this.runClaude(args, prompt);
+    await this.runClaude(args, promptWithFeedback(prompt));
 
     this.sessionState.phase = 'implementation';
     this.log('info', 'Critique completed, returning to implementation');
@@ -798,7 +1065,7 @@ Ensure everything is production-ready and well-documented.`;
 
     const args = this.sessionState.sessionId ? ['--resume', this.sessionState.sessionId] : [];
 
-    await this.runClaude(args, prompt);
+    await this.runClaude(args, promptWithFeedback(prompt));
 
     this.log('info', 'Autonomous run completed successfully!');
   }
@@ -853,7 +1120,7 @@ Focus on getting back on track with: ${this.sessionState.goal}`;
 
         await this.resourceManager.executeOperation(
           `recovery_${retries}`,
-          () => this.runClaude(args, recoveryPrompt),
+          () => this.runClaude(args, promptWithFeedback(recoveryPrompt)),
           this.timeoutMs / 2 // Shorter timeout for recovery
         );
 

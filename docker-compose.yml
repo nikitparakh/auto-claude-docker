@@ -23,15 +23,23 @@ services:
       - PG_URL=${PG_URL}
       # Orchestrator configuration
       - NODE_ENV=production
-      - MODEL=${MODEL:-claude-sonnet-4-5-20250929}
       - LOG_LEVEL=${LOG_LEVEL:-debug}
       - MAX_ITERATIONS=${MAX_ITERATIONS:-12}
       - MAX_RETRIES=${MAX_RETRIES:-3}
       - DEFAULT_TIMEOUT=${DEFAULT_TIMEOUT:-600000}
       - MAX_CONCURRENT_OPS=${MAX_CONCURRENT_OPS:-5}
       - API_TIMEOUT_MS=3000000
+      # Discord integration (optional)
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
+      - DISCORD_GUILD_NAME=${DISCORD_GUILD_NAME:-Auto Claude Project}
+      - DISCORD_STATUS_CHANNEL=${DISCORD_STATUS_CHANNEL:-status-updates}
+      - DISCORD_FEEDBACK_CHANNEL=${DISCORD_FEEDBACK_CHANNEL:-feedback}
+      - DISCORD_CATEGORY_NAME=${DISCORD_CATEGORY_NAME:-project}
+      - STATUS_UPDATE_INTERVAL_MINUTES=${STATUS_UPDATE_INTERVAL_MINUTES:-30}
     volumes:
-      - ./project:/project
+      - ${CLAUDE_BASE_WORKSPACE_DIR:-/Users/nikitparakh/PersonalClaudeProjects}/${CLAUDE_PROJECT_NAME:-claude-project}:/project
+      - ./project:/app/project-template:ro
       - claude_home:/home/claude/.claude  # persists login, checkpoints, transcripts (for non-root user)
     working_dir: /app
     restart: unless-stopped

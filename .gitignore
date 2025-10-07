@@ -32,6 +32,9 @@ project/QUICK_REFERENCE.md
 project/COMPREHENSIVE_TEST_REPORT.md
 project/README.md
 project/package-lock.json
+project/
+/project
+../claude-workspace
 
 # Claude session data (will be regenerated)
 project/.claude/*.json

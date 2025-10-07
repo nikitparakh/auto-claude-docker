@@ -105,10 +105,77 @@ export class DiscordManager {
       if (!channel || channel.type !== ChannelType.GuildText) {
         return;
       }
-      await (channel as TextChannel).send(message);
+
+      // Discord message limit is 2000 characters
+      const DISCORD_MESSAGE_LIMIT = 2000;
+
+      if (message.length <= DISCORD_MESSAGE_LIMIT) {
+        await (channel as TextChannel).send(message);
+      } else {
+        // Split message into chunks
+        const chunks = this.splitMessage(message, DISCORD_MESSAGE_LIMIT);
+        for (const chunk of chunks) {
+          await (channel as TextChannel).send(chunk);
+          // Small delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
     } catch {
       // ignore send errors; caller will log
     }
+  }
+
+  private splitMessage(message: string, maxLength: number): string[] {
+    if (message.length <= maxLength) {
+      return [message];
+    }
+
+    const chunks: string[] = [];
+    let currentChunk = '';
+
+    // Split by lines to avoid breaking mid-sentence
+    const lines = message.split('\n');
+
+    for (const line of lines) {
+      // If a single line exceeds the limit, split it
+      if (line.length > maxLength) {
+        if (currentChunk) {
+          chunks.push(currentChunk);
+          currentChunk = '';
+        }
+        // Split long line by words
+        const words = line.split(' ');
+        for (const word of words) {
+          if ((currentChunk + word + ' ').length > maxLength) {
+            if (currentChunk) {
+              chunks.push(currentChunk.trim());
+            }
+            currentChunk = word + ' ';
+          } else {
+            currentChunk += word + ' ';
+          }
+        }
+      } else if ((currentChunk + line + '\n').length > maxLength) {
+        chunks.push(currentChunk.trim());
+        currentChunk = line + '\n';
+      } else {
+        currentChunk += line + '\n';
+      }
+    }
+
+    if (currentChunk.trim()) {
+      chunks.push(currentChunk.trim());
+    }
+
+    // Add continuation markers
+    return chunks.map((chunk, index) => {
+      if (chunks.length > 1) {
+        const prefix = index > 0 ? `**[Continued ${index + 1}/${chunks.length}]**\n` : '';
+        const suffix = index < chunks.length - 1 ? '\n\n*(continued...)*' : '';
+        return prefix + chunk + suffix;
+      }
+      return chunk;
+    });
   }
 
   onFeedbackMessage(

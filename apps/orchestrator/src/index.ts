@@ -11,8 +11,9 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { createWriteStream, WriteStream } from 'node:fs';
+import Anthropic from '@anthropic-ai/sdk';
 import { DiscordManager } from './discord.js';
-import { feedbackStore } from './feedback.js';
+import { feedbackStore, FeedbackCategory, FeedbackPriority } from './feedback.js';
 
 interface SessionState {
   sessionId?: string;
@@ -198,12 +199,19 @@ class Orchestrator {
   private statusInterval?: ReturnType<typeof setInterval>;
   private shouldInterruptForFeedback = false;
   private currentClaudeProcess?: ReturnType<typeof spawn>;
+  private anthropic: Anthropic;
 
   constructor(goalFallback?: string) {
     this.ensureProjectWorkspace();
 
     this.logger = new Logger(this.projectDir);
     this.resourceManager = new ResourceManager();
+
+    // Initialize Anthropic client for direct API calls (used for Discord routing)
+    this.anthropic = new Anthropic({
+      apiKey: process.env.ZAI_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '',
+      baseURL: process.env.ANTHROPIC_BASE_URL || 'https://api.z.ai/api/anthropic',
+    });
 
     // Initialize sessionState early to avoid race conditions
     this.sessionState = {
@@ -238,6 +246,286 @@ class Orchestrator {
   }
 
   private goal: string;
+
+  /**
+   * Call Claude API directly for LLM-based routing (separate from main development loop)
+   */
+  private async callClaudeAPI(
+    systemPrompt: string,
+    userMessage: string,
+    tools: Anthropic.Tool[]
+  ): Promise<Anthropic.Messages.Message> {
+    try {
+      const response = await this.anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userMessage }],
+        tools,
+      });
+
+      return response;
+    } catch (error) {
+      this.log('error', `Claude API call failed: ${error}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Build context summary for LLM routing
+   */
+  private buildContextSummary(): string {
+    const uptimeMs = Date.now() - new Date(this.sessionState.startTime).getTime();
+    const uptimeMinutes = Math.floor(uptimeMs / 60000);
+    const recentErrors = this.sessionState.errors
+      .slice(-3)
+      .map(
+        e =>
+          `- [${e.phase}] ${e.error.substring(0, 150)}${e.error.length > 150 ? '...' : ''} (${e.recovered ? 'recovered' : 'not recovered'})`
+      )
+      .join('\n');
+
+    return `
+## Current Project Status
+
+**Goal:** ${this.goal}
+
+**Current Phase:** ${this.sessionState.phase}
+**Iteration:** ${this.sessionState.iteration} / ${this.sessionState.maxIterations}
+**Uptime:** ${uptimeMinutes} minutes
+
+**Metrics:**
+- Total Operations: ${this.sessionState.metrics.totalOperations}
+- Successful: ${this.sessionState.metrics.successfulOperations}
+- Failed: ${this.sessionState.metrics.failedOperations}
+
+**Recent Errors:**
+${recentErrors || 'None'}
+
+**Pending Feedback:** ${feedbackStore.size()} items
+`.trim();
+  }
+
+  /**
+   * Intelligent Discord message handler with LLM-based routing
+   */
+  private async handleDiscordMessage(
+    content: string,
+    authorTag: string,
+    attachments: Array<{ name: string; url: string }>
+  ): Promise<void> {
+    this.log('info', `Processing Discord message from ${authorTag}`, {
+      contentPreview: content.substring(0, 100),
+    });
+
+    // Define tools for the LLM to choose from
+    const tools: Anthropic.Tool[] = [
+      {
+        name: 'respond_to_user',
+        description:
+          'Respond conversationally to user queries about project status, research findings, design decisions, or other informational questions. Use this when the user is asking a question rather than requesting a change.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            response: {
+              type: 'string',
+              description:
+                'The natural language response to send back to the user, based on the current project context.',
+            },
+          },
+          required: ['response'],
+        },
+      },
+      {
+        name: 'submit_feedback',
+        description:
+          'Submit actionable feedback (bug report, feature request, directive, improvement) that requires immediate action and should interrupt the current development cycle.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            category: {
+              type: 'string',
+              enum: ['bug_report', 'feature_request', 'directive', 'improvement'],
+              description: 'Type of feedback being submitted.',
+            },
+            priority: {
+              type: 'string',
+              enum: ['critical', 'high', 'medium', 'low'],
+              description: 'Priority level for this feedback.',
+            },
+            summary: {
+              type: 'string',
+              description: 'Brief summary of the feedback (1-2 sentences).',
+            },
+          },
+          required: ['category', 'priority', 'summary'],
+        },
+      },
+    ];
+
+    const systemPrompt = `You are an intelligent routing agent for a Discord feedback system integrated with an autonomous Claude development orchestrator.
+
+Your job is to analyze user messages and decide whether to:
+1. **Respond conversationally** (use respond_to_user) - for queries about project status, findings, decisions, or informational questions
+2. **Submit actionable feedback** (use submit_feedback) - for directives, bug reports, feature requests, or improvements that need immediate action
+
+Consider the context carefully. Questions like "What are our findings?" or "How is the project going?" should get conversational responses. Directives like "Change the button color" or "Add a loading spinner" should be submitted as feedback.
+
+${this.buildContextSummary()}
+
+Choose the appropriate tool based on the user's intent.
+
+**IMPORTANT:** Keep responses concise. Discord has a 2000 character limit per message. Responses should be 300-800 characters ideally, maximum 1500 characters. Be brief and to the point.`;
+
+    try {
+      // Call Claude API with tools
+      const response = await this.callClaudeAPI(
+        systemPrompt,
+        `User ${authorTag} says:\n${content}${
+          attachments.length > 0
+            ? `\n\nAttachments:\n${attachments.map(a => `- ${a.name}: ${a.url}`).join('\n')}`
+            : ''
+        }`,
+        tools
+      );
+
+      // Process the response
+      for (const block of response.content) {
+        if (block.type === 'tool_use') {
+          const toolName = block.name;
+          const toolInput = block.input as Record<string, unknown>;
+
+          if (toolName === 'respond_to_user') {
+            // Send conversational response back to Discord (no interruption)
+            let responseText = toolInput.response as string;
+            const originalLength = responseText.length;
+
+            // Safety truncation: Ensure response isn't too long
+            // Discord limit is 2000, reserve space for formatting
+            const MAX_RESPONSE_LENGTH = 1600;
+            if (responseText.length > MAX_RESPONSE_LENGTH) {
+              responseText =
+                responseText.substring(0, MAX_RESPONSE_LENGTH - 50) +
+                '\n\n...(response truncated due to length)';
+              this.log(
+                'warn',
+                `Response truncated from ${originalLength} to ${responseText.length} chars`
+              );
+            }
+
+            this.log('info', `Sending conversational response to ${authorTag}`, {
+              responseLength: responseText.length,
+            });
+
+            if (this.feedbackChannelId && this.discord) {
+              const message = [
+                `💬 **Response to ${authorTag}:**`,
+                '',
+                responseText,
+                '',
+                `_Context: ${this.sessionState.phase} phase, iteration ${this.sessionState.iteration}_`,
+              ].join('\n');
+
+              await this.discord.sendMessage(this.feedbackChannelId, message);
+            }
+          } else if (toolName === 'submit_feedback') {
+            // Queue feedback and interrupt the development cycle
+            const category = toolInput.category as FeedbackCategory;
+            const priority = toolInput.priority as FeedbackPriority;
+            const summary = toolInput.summary as string;
+
+            this.log('info', 'Submitting actionable feedback - interrupting current cycle', {
+              category,
+              priority,
+              authorTag,
+            });
+
+            // Enqueue feedback with categorization
+            feedbackStore.enqueue({
+              authorTag,
+              content,
+              attachments,
+              category,
+              priority,
+              summary,
+            });
+
+            // Send acknowledgment to Discord
+            if (this.feedbackChannelId && this.discord) {
+              const priorityEmoji = {
+                critical: '🔴',
+                high: '🟠',
+                medium: '🟡',
+                low: '🟢',
+              }[priority];
+
+              const categoryEmoji = {
+                bug_report: '🐛',
+                feature_request: '✨',
+                directive: '📋',
+                improvement: '⚡',
+                question: '❓',
+              }[category];
+
+              // Build acknowledgment with length safety
+              const maxContentPreview = 250;
+              const contentPreview =
+                content.length > maxContentPreview
+                  ? content.substring(0, maxContentPreview) + '...'
+                  : content;
+
+              const ack = [
+                `⚡ **Feedback submitted from ${authorTag}**`,
+                '',
+                `${categoryEmoji} **Type:** ${category.replace('_', ' ')}`,
+                `${priorityEmoji} **Priority:** ${priority}`,
+                `📝 **Summary:** ${summary.length > 150 ? summary.substring(0, 147) + '...' : summary}`,
+                '',
+                `**Your message:**`,
+                `> ${contentPreview}`,
+                attachments.length > 0 ? `📎 **Attachments:** ${attachments.length}` : '',
+                '',
+                `🔄 **Status:** Interrupting current cycle to process immediately...`,
+                `⏱️ **Current phase:** ${this.sessionState.phase} (iteration ${this.sessionState.iteration}/${this.sessionState.maxIterations})`,
+              ]
+                .filter(Boolean)
+                .join('\n');
+
+              await this.discord.sendMessage(this.feedbackChannelId, ack);
+            }
+
+            // Interrupt the current Claude process
+            this.shouldInterruptForFeedback = true;
+            if (this.currentClaudeProcess) {
+              this.log('info', 'Killing current Claude process to handle feedback immediately');
+              this.currentClaudeProcess.kill('SIGTERM');
+            }
+          }
+        }
+      }
+    } catch (error) {
+      this.log('error', `Failed to handle Discord message: ${error}`);
+
+      // Send error acknowledgment
+      if (this.feedbackChannelId && this.discord) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorPreview =
+          errorMessage.length > 200 ? errorMessage.substring(0, 197) + '...' : errorMessage;
+
+        const errorMsg = [
+          `❌ **Error processing message from ${authorTag}**`,
+          '',
+          `I encountered an error while processing your message. The system will continue running.`,
+          '',
+          `_Error: ${errorPreview}_`,
+        ].join('\n');
+
+        await this.discord.sendMessage(this.feedbackChannelId, errorMsg).catch(() => {
+          // Ignore send errors
+        });
+      }
+    }
+  }
 
   private ensureProjectWorkspace() {
     try {
@@ -788,42 +1076,11 @@ This repository was initialized automatically by the Claude orchestrator.
       this.statusChannelId = statusChannel.id;
       this.feedbackChannelId = feedbackChannel.id;
 
-      // Feedback ingestion
+      // Feedback ingestion with intelligent routing
       this.discord.onFeedbackMessage(
         async (content, authorTag, attachments) => {
-          feedbackStore.enqueue({ authorTag, content, attachments });
-          this.log('info', 'Received Discord feedback - interrupting current cycle', {
-            authorTag,
-            contentPreview: content.substring(0, 120),
-            attachments: attachments.length,
-          });
-
-          // Send immediate acknowledgment back to feedback channel
-          if (this.feedbackChannelId && this.discord) {
-            const ack = [
-              `✅ **Feedback received from ${authorTag}**`,
-              ``,
-              `📝 **Your message:**`,
-              `> ${content.substring(0, 300)}${content.length > 300 ? '...' : ''}`,
-              attachments.length > 0 ? `📎 **Attachments:** ${attachments.length}` : '',
-              ``,
-              `⚡ **Status:** Interrupting current cycle to process your feedback immediately...`,
-              `⏱️ **Current phase:** ${this.sessionState.phase} (iteration ${this.sessionState.iteration}/${this.sessionState.maxIterations})`,
-            ]
-              .filter(Boolean)
-              .join('\n');
-
-            await this.discord.sendMessage(this.feedbackChannelId, ack).catch(err => {
-              this.log('warn', `Failed to send feedback acknowledgment: ${err}`);
-            });
-          }
-
-          // Interrupt the current Claude process to process feedback immediately
-          this.shouldInterruptForFeedback = true;
-          if (this.currentClaudeProcess) {
-            this.log('info', 'Killing current Claude process to handle feedback immediately');
-            this.currentClaudeProcess.kill('SIGTERM');
-          }
+          // Use the new intelligent handler
+          await this.handleDiscordMessage(content, authorTag, attachments);
         },
         { channelId: this.feedbackChannelId }
       );
@@ -847,11 +1104,67 @@ This repository was initialized automatically by the Claude orchestrator.
       return;
     }
     try {
-      const summary = this.buildStatusSummary();
-      await this.discord.sendMessage(this.statusChannelId, summary);
+      // Use LLM to generate intelligent, context-aware status update
+      const statusUpdate = await this.generateIntelligentStatusUpdate();
+      await this.discord.sendMessage(this.statusChannelId, statusUpdate);
+      this.log('info', 'Sent intelligent status update', {
+        length: statusUpdate.length,
+      });
     } catch (e) {
       this.log('warn', `Error during status update: ${e}`);
+      // Fallback to basic summary if LLM fails
+      try {
+        const fallback = this.buildStatusSummary();
+        await this.discord.sendMessage(this.statusChannelId, fallback);
+      } catch (fallbackError) {
+        this.log('error', `Fallback status update also failed: ${fallbackError}`);
+      }
     }
+  }
+
+  private async generateIntelligentStatusUpdate(): Promise<string> {
+    const uptimeMs = Date.now() - new Date(this.sessionState.startTime).getTime();
+    const uptimeMinutes = Math.floor(uptimeMs / 60000);
+    const recentErrors = this.sessionState.errors
+      .slice(-3)
+      .map(e => `${e.phase}: ${e.error.substring(0, 100)}${e.recovered ? ' (recovered)' : ''}`)
+      .join('; ');
+
+    const systemPrompt = `You are a concise status reporter for an autonomous development system. Generate a brief, natural status update.
+
+Current State:
+- Phase: ${this.sessionState.phase}
+- Iteration: ${this.sessionState.iteration}/${this.sessionState.maxIterations}
+- Uptime: ${uptimeMinutes} minutes
+- Operations: ${this.sessionState.metrics.successfulOperations}/${this.sessionState.metrics.totalOperations} successful
+- Failed operations: ${this.sessionState.metrics.failedOperations}
+- Recent errors: ${recentErrors || 'None'}
+- Pending feedback: ${feedbackStore.size()}
+
+Generate a natural, conversational status update (200-400 characters). Be concise but informative. Highlight what's notable or concerning. Use emojis if appropriate. Start with an emoji that reflects the current state.`;
+
+    const response = await this.anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 512,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: 'Generate the status update now.' }],
+    });
+
+    // Extract text from response
+    const textBlock = response.content.find(block => block.type === 'text');
+    if (!textBlock || textBlock.type !== 'text') {
+      throw new Error('No text response from LLM');
+    }
+
+    let statusText = textBlock.text.trim();
+
+    // Safety truncation for Discord limit
+    const MAX_STATUS_LENGTH = 1500;
+    if (statusText.length > MAX_STATUS_LENGTH) {
+      statusText = statusText.substring(0, MAX_STATUS_LENGTH - 50) + '\n\n...(truncated)';
+    }
+
+    return statusText;
   }
 
   private buildStatusSummary(): string {
@@ -859,13 +1172,16 @@ This repository was initialized automatically by the Claude orchestrator.
     const mins = Math.floor(uptimeMs / 60000);
     const secs = Math.floor((uptimeMs % 60000) / 1000);
     const metrics = this.sessionState.metrics;
+
     return [
-      `Project: ${this.goal}`,
-      `Phase: ${this.sessionState.phase}`,
-      `Iteration: ${this.sessionState.iteration}/${this.sessionState.maxIterations}`,
-      `Uptime: ${mins}m ${secs}s`,
-      `Ops: total=${metrics.totalOperations}, ok=${metrics.successfulOperations}, fail=${metrics.failedOperations}`,
-      feedbackStore.hasPending() ? `Pending feedback: ${feedbackStore.size()}` : undefined,
+      `**📊 Status Update**`,
+      ``,
+      `**Phase:** ${this.sessionState.phase}`,
+      `**Iteration:** ${this.sessionState.iteration}/${this.sessionState.maxIterations}`,
+      `**Uptime:** ${mins}m ${secs}s`,
+      `**Operations:** ${metrics.successfulOperations}/${metrics.totalOperations} successful`,
+      metrics.failedOperations > 0 ? `**Failures:** ${metrics.failedOperations}` : undefined,
+      feedbackStore.hasPending() ? `**Pending feedback:** ${feedbackStore.size()}` : undefined,
     ]
       .filter(Boolean)
       .join('\n');

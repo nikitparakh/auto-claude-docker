@@ -9,6 +9,7 @@ A Docker-first autonomous Claude system that coordinates multiple sub-agents wit
 - **Hooks**: Quality gates and automated validation
 - **MCP Tools**: External integrations (GitHub, Postgres, Exa Search, Puppeteer)
 - **Checkpoints**: Safe rollback system for long-running sessions
+- **Discord Integration**: Intelligent conversational agent for real-time feedback and queries
 
 ## 🚀 Quick Start
 
@@ -130,6 +131,59 @@ Each phase includes automatic checkpoints for safe recovery.
 - **Checkpoints**: Automatic rollback points stored in `.claude/checkpoints_*.json`
 - **Logs**: Real-time progress via Docker logs
 - **Summaries**: End-of-session analytics and recommendations
+
+## 💬 Discord Integration (NEW)
+
+The system includes an **intelligent Discord bot** that can distinguish between queries and actionable feedback:
+
+### Dual-Mode System
+
+**Conversational Mode** (No Interruption)
+- Ask questions: *"What's our progress?"* or *"What are the research findings?"*
+- Get context-aware responses with current status, metrics, and phase information
+- Development cycle continues uninterrupted
+
+**Actionable Feedback Mode** (With Interruption)
+- Submit feedback: *"Change button color to blue"* or *"Fix login bug"*
+- Automatically categorized (bug report, feature request, directive, improvement)
+- Assigned priority (critical, high, medium, low)
+- Immediately interrupts development cycle for processing
+
+### Setup
+
+1. Configure Discord bot in `.env`:
+   ```env
+   DISCORD_BOT_TOKEN=your_bot_token
+   DISCORD_GUILD_ID=your_guild_id
+   DISCORD_FEEDBACK_CHANNEL=feedback
+   ```
+
+2. The bot creates private channels automatically and provides:
+   - Real-time status updates (every 30 minutes by default)
+   - Intelligent message routing via LLM
+   - Rich formatted responses with emoji indicators
+   - Automatic message length handling (Discord 2000 char limit)
+
+### Example Interactions
+
+```
+User: "How is the project going?"
+Bot: 💬 Response:
+The project is in implementation phase (iteration 5/12). 
+We've completed 45 operations successfully with 2 minor 
+recovered failures. System uptime: 127 minutes.
+```
+
+```
+User: "Add dark mode toggle"
+Bot: ⚡ Feedback submitted
+✨ Type: feature request
+🟡 Priority: medium
+📝 Summary: Add dark mode toggle
+🔄 Status: Interrupting current cycle...
+```
+
+**📖 Full Documentation**: See `DISCORD_INTELLIGENT_AGENT.md` and `TESTING_INTELLIGENT_AGENT.md`
 
 ## 🛡️ Safety Features
 

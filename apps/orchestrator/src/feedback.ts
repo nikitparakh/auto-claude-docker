@@ -3,12 +3,24 @@ export interface FeedbackAttachment {
   url: string;
 }
 
+export type FeedbackCategory =
+  | 'bug_report'
+  | 'feature_request'
+  | 'directive'
+  | 'improvement'
+  | 'question';
+
+export type FeedbackPriority = 'critical' | 'high' | 'medium' | 'low';
+
 export interface FeedbackItem {
   id: string;
   timestamp: string;
   authorTag: string;
   content: string;
   attachments: FeedbackAttachment[];
+  category?: FeedbackCategory;
+  priority?: FeedbackPriority;
+  summary?: string;
 }
 
 export class FeedbackStore {
